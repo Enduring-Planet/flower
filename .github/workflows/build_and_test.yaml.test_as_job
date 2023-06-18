@@ -1,0 +1,78 @@
+name: Backend build and test
+
+on:
+  push:
+    branches-ignore:
+      - main
+    tags-ignore:
+      - '**'
+
+  workflow_call:
+    inputs:
+      env_name:
+        description: 'Env name'
+        default: 'dev'
+        required: false
+        type: string
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      SLACK_TOKEN:
+        required: true
+    outputs:
+      image_tag:
+        description: 'Built image tag'
+        value: ${{ jobs.build_docker_image.outputs.image_tag }}
+
+env:
+  ECR_IMAGE_NAME: "515448309407.dkr.ecr.us-east-1.amazonaws.com/ep-backend"
+
+jobs:
+  build_docker_image:
+    name: Build docker image
+    runs-on: github-runner-dev
+    outputs:
+      image_tag: ${{ steps.build_image.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/build_image
+        id: build_image
+        with:
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: us-east-1
+          image_name: "${ECR_IMAGE_NAME}"
+          env_name: ${{ inputs.env_name }}
+          slack_token: ${{ secrets.SLACK_TOKEN }}
+
+  test_app:
+    name: Test application
+    runs-on: github-runner-dev
+    needs: build_docker_image
+    services:
+      redis:
+        image: redis:5-alpine
+        ports:
+          - 6379:6379
+      postgres:
+        image: postgres:12-alpine
+        env:
+          POSTGRES_USER: enduringplanet
+          POSTGRES_DB: enduringplanet
+          POSTGRES_PASSWORD: enduringplanet
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/test_app
+        with:
+          image_name: "${ECR_IMAGE_NAME}"
+          image_tag: ${{ needs.build_docker_image.outputs.image_tag }}
+          env_name: ${{ inputs.env_name }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: us-east-1
+          services_network: ${{ job.services.redis.network }}
+          slack_token: ${{ secrets.SLACK_TOKEN }}

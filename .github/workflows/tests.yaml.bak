@@ -1,0 +1,121 @@
+name: Tests
+on:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: github-runner-dev
+    outputs:
+      image_tag: ${{ steps.build_image.outputs.image_tag }}
+    services:
+      redis:
+        image: redis:5-alpine
+        ports:
+          - 6379:6379
+      postgres:
+        image: postgres:12-alpine
+        env:
+          POSTGRES_USER: enduringplanet
+          POSTGRES_DB: enduringplanet
+          POSTGRES_PASSWORD: enduringplanet
+        ports:
+          - 5432:5432
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python environment
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.9
+
+      - name: Cache apt packages
+        uses: actions/cache@v2
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-${{ hashFiles('**/apt.conf') }}
+
+      - name: Install libs
+        run: |
+          sudo apt-get update
+          sudo apt-get upgrade -y
+          sudo DEBIAN_FRONTEND="noninteractive" apt-get install -y \
+                postgresql \
+                postgresql-contrib \
+                libpq-dev \
+                gcc \
+                python3-dev \
+                musl-dev \
+                musl-dev \
+                libffi-dev \
+                libssl-dev \
+                libcurl4-openssl-dev \
+                cargo \
+                jq \
+                bash \
+                make \
+                g++ \
+                python3-pdfkit \
+                wkhtmltopdf
+
+
+      - name: Cache updated packages
+        uses: actions/cache@v2
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-${{ hashFiles('**/apt.conf') }}
+
+
+      - name: Cache pip packages
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.local/share/virtualenvs
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+
+      - name: Install dependencies and cache them
+        run: |
+          python3.9 -m pip install --upgrade pip
+          pip3.9 install -r requirements.txt
+
+      - name: Cache updated packages
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.local/share/virtualenvs
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+
+      - name: Run Tests
+        env:
+          DB_ENGINE: "django.db.backends.postgresql"
+          DB_USER: "enduringplanet"
+          DB_DATABASE: "enduringplanet"
+          DB_PASSWORD: "enduringplanet"
+          DB_HOST: "postgres"
+          DB_PORT: "5432"
+          AUTH0_DOMAIN: ""
+          AUTH0_API_IDENTIFIER: ""
+          REDIS_HOST: "redis"
+          REDIS_PORT: "6379"
+          REDIS_DB_CELERY: "0"
+          DEBUG: "1"
+          DJANGO_ALLOWED_HOSTS: '*'
+          DJANGO_SETTINGS_MODULE: "enduring_planet.settings"
+        run: |
+          python3.9 manage.py test --noinput
+
+      - uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test_results_${{ github.run_number }}
+          path: test_results/
+
+#      - uses: ./.github/actions/slack_notification
+#        if: failure()
+#        with:
+#          slack_token: ${{ secrets.SLACK_TOKEN }}
+#          message_pic: ':red_circle:'
+#          message: "Job failed for ${{ github.ref_name }}!"
+

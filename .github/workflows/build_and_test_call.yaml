@@ -1,0 +1,80 @@
+name: Backend build and test call
+
+on:
+  workflow_call:
+    inputs:
+      env_name:
+        description: 'Env name'
+        default: 'dev'
+        required: false
+        type: string
+      ecr_region:
+        description: 'ECR region'
+        default: 'us-east-1'
+        required: false
+        type: string
+      push_to_ecr:
+        description: 'Push image to rgistry'
+        default: false
+        required: false
+        type: boolean
+      trivy_ignore_found:
+        description: 'Ignore found vulnerability in image'
+        default: false
+        required: false
+        type: boolean
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      SLACK_TOKEN:
+        required: true
+    outputs:
+      image_tag:
+        description: 'Built image tag'
+        value: ${{ jobs.build_docker_image.outputs.image_tag }}
+
+jobs:
+  test_vulnerabilities:
+    name: Trivy vulnerability check
+    runs-on: github-runner-dev
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/test_vulnerabilities
+        with:
+          slack_token: ${{ secrets.SLACK_TOKEN }}
+          ignore_found: ${{ inputs.trivy_ignore_found }}
+
+  build_docker_image:
+    name: Build docker image
+    runs-on: github-runner-dev
+    needs: [test_vulnerabilities]
+    outputs:
+      image_tag: ${{ steps.build_image.outputs.image_tag }}
+    services:
+      redis:
+        image: redis:5-alpine
+        ports:
+          - 6379:6379
+      postgres:
+        image: postgres:12-alpine
+        env:
+          POSTGRES_USER: enduringplanet
+          POSTGRES_DB: enduringplanet
+          POSTGRES_PASSWORD: enduringplanet
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/build_image
+        id: build_image
+        with:
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: ${{ inputs.ecr_region }}
+          env_name: ${{ inputs.env_name }}
+          services_network: ${{ job.services.redis.network }}
+          slack_token: ${{ secrets.SLACK_TOKEN }}
+          push_to_ecr: ${{ inputs.push_to_ecr }}
+          trivy_ignore_found:  ${{ inputs.trivy_ignore_found }}

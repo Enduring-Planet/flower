@@ -1,0 +1,27 @@
+name: Backend deploy dev
+
+on:
+  push:
+    branches:
+      - develop
+      - EP-2257-add-helm-chart
+
+jobs:
+
+  deploy_dev:
+    name: 'Deploy / dev'
+    runs-on: github-runner-dev
+    needs: [build_docker_image_call]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/deploy_app
+        id: deploy_app
+        with:
+          env_name: dev
+          image_name: "515448309407.dkr.ecr.us-east-1.amazonaws.com/ep-backend-dev"
+          image_tag: ${{ needs.build_docker_image_call.outputs.image_tag }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: us-east-1
+          aws_profile: ep
+          slack_token: ${{ secrets.SLACK_TOKEN }}

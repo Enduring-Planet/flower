@@ -1,0 +1,186 @@
+name: deploy_dispatch
+description: Deploy App to Kubernetes
+
+inputs:
+  env_name:
+    description: Env name
+    required: true
+  image_name:
+    description: Docker Image name
+    required: true
+  image_tag:
+    description: Docker Image tag
+    required: true
+  aws_access_key_id:
+    description: Access key
+    required: true
+  aws_secret_access_key:
+    description: Secret key
+    required: true
+  aws_region:
+    description: AWS region
+    required: true
+  aws_profile:
+    description: AWS profile name
+    required: true
+  slack_token:
+    description: 'Slack bot token'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+      with:
+        path: ~/app
+
+    - name: Setting k8s cluster parameters
+      shell: bash
+      run: |
+        echo "Setting k8s cluster parameters"
+
+        case ${{ inputs.env_name }} in
+          dev|main|dev_ft|stage)
+            EKS_NAME="ep-dev-eks-cluster"
+            EKS_REGION="us-east-1"
+            ;;
+          prod)
+            EKS_NAME="ep-prod-eks-cluster"
+            EKS_REGION="us-east-2"
+            ;;
+          *)
+            echo "Unsupported Environment ${{ inputs.env_name }}."
+            exit 1
+            ;;
+        esac
+    - name: Setting app parameters
+      shell: bash
+      run: |
+        echo "Setting app parameters"
+        # Variables names format: K8S_<ENV_NAME>_NS
+        K8S_DEV_NS="dev-ep-backend"
+        K8S_DEV_FT_NS="dev-ft-ep-backend"
+        K8S_STAGE_NS="stage-ep-backend"
+        K8S_MAIN_NS="main-ep-backend"
+        K8S_PROD_NS="prod-ep-backend"
+
+        # Can be set as env variables
+        # K8S_DEV_HELM_UNINSTALL_BEFORE_RELEASE="true"
+        # K8S_MAIN_HELM_UNINSTALL_BEFORE_RELEASE="true"
+        # K8S_PROD_HELM_UNINSTALL_BEFORE_RELEASE="true"
+
+        ENV_NAME_LC="${{ inputs.env_name }}"
+        ENV_NAME_UC="${ENV_NAME_LC^^}"
+        echo "ENV_NAME_UC=$ENV_NAME_UC" >> $GITHUB_ENV
+
+        HELM_RELEASE_NAMESPACE_VAR_NM="K8S_${ENV_NAME_UC}_NS"
+        HELM_RELEASE_NAMESPACE_NM="${!HELM_RELEASE_NAMESPACE_VAR_NM}"
+
+        HELM_UNINSTALL_VAR_NM="K8S_${ENV_NAME_UC}_HELM_UNINSTALL_BEFORE_RELEASE"
+        HELM_UNINSTALL_BEFORE_RELEASE=${!HELM_UNINSTALL_VAR_NM}
+    - name: Create aws cli config
+      shell: bash
+      run: |
+        # Create aws cli config
+        mkdir -p ~/.aws
+        echo '' >> ~/.aws/credentials
+        echo "[${{ inputs.aws_profile }}]
+        aws_access_key_id = ${{ inputs.aws_access_key_id }}
+        aws_secret_access_key = ${{ inputs.aws_secret_access_key }}
+        " >> ~/.aws/credentials
+        echo '' >> ~/.aws/config
+        echo "[profile ${{ inputs.aws_profile }}]
+        region = ${{ inputs.aws_region }}
+        " >> ~/.aws/config
+
+        export AWS_PROFILE=${{ inputs.aws_profile }}
+    - name: Creating kube config
+      shell: bash
+      run: |
+        echo "Creating kube config"
+        aws eks --region $EKS_REGION update-kubeconfig --name $EKS_NAME --profile ${{ inputs.aws_profile }}
+        if [[ $? -ne 0 ]]; then
+          exit 1
+        fi
+    - name: Verifying installed chart
+      shell: bash
+      run: |
+        echo "Verifying installed chart"
+        if [[ `helm list -a -n ${HELM_RELEASE_NAMESPACE_NM} -o json | jq ".[].status" | grep -v 'deployed' | wc -l` -gt 0 ]]; then
+          echo "Uninstalling failed helm release."
+          helm uninstall ${HELM_RELEASE_NAMESPACE_NM} -n ${HELM_RELEASE_NAMESPACE_NM} --wait || true
+        fi
+    - name: Uninstalling helm release if requested
+      shell: bash
+      run: |
+        # Uninstalling helm release if requested
+        if [[ "$HELM_UNINSTALL_BEFORE_RELEASE" == "true" ]]; then
+          echo "Uninstalling helm chart ${HELM_RELEASE_NAMESPACE_NM}"
+          if [[ `helm list -a -n ${HELM_RELEASE_NAMESPACE_NM} --filter "${HELM_RELEASE_NAMESPACE_NM}" | wc -l` -gt 1 ]]; then
+            helm uninstall ${HELM_RELEASE_NAMESPACE_NM} -n ${HELM_RELEASE_NAMESPACE_NM} --wait
+          fi
+        fi
+    - name: Deploying image
+      shell: bash
+      run: |
+        echo "Deploying image ${{ inputs.image_name }}:${{ inputs.image_tag }}"
+        values_file="helm_chart/values_${{ inputs.env_name }}.yaml"
+
+        echo "Preparing sops data"
+        secret_values="helm_chart/sops_encoded_secrets_${{ inputs.env_name }}.yaml"
+        sops -d ${secret_values} | sed 's/^/  /g' >> ${values_file}
+
+        helm_release_log_file="/tmp/helm_release_upgrade.log"
+        echo '' > $helm_release_log_file
+        echo '' > /tmp/application_logs.log
+
+        helm upgrade --install ${HELM_RELEASE_NAMESPACE_NM} \
+        --atomic --cleanup-on-fail \
+        --timeout 300s \
+        --namespace ${HELM_RELEASE_NAMESPACE_NM} --create-namespace \
+        -f ${values_file} \
+        --set image.repository=${{ inputs.image_name }} \
+        --set image.tag=${{ inputs.image_tag }} \
+        helm_chart 2>&1 > $helm_release_log_file &
+    - name: Verifying helm deploy
+      shell: bash
+      run: |
+        echo "Verifying helm deploy"
+        scripts/verify_helm_upgrade_process.sh \
+          ${HELM_RELEASE_NAMESPACE_NM} \
+          ${HELM_RELEASE_NAMESPACE_NM} \
+          ${{ inputs.image_tag }}
+        if [[ $? -ne 0 ]]; then
+          echo -e "\n\n-------Helm logs:\n"
+          cat $helm_release_log_file
+          exit 1
+        fi
+
+        echo -e "\n\n-------Helm logs:\n"
+        cat $helm_release_log_file
+
+    - uses: actions/upload-artifact@v3
+      if: ${{ always() }}
+      with:
+        name: helm_release_upgrade-${{ github.run_number }}.log
+        path: /tmp/helm_release_upgrade.log
+
+    - uses: actions/upload-artifact@v3
+      if: ${{ always() }}
+      with:
+        name: application_logs-${{ github.run_number }}.log
+        path: /tmp/application_logs.log
+
+    - uses: ./.github/actions/slack_notification
+      if: ${{ success() }}
+      with:
+        slack_token: ${{ inputs.slack_token }}
+        message: "Deployed to *${{ env.ENV_NAME_UC }} backend* image ${{ inputs.image_tag }} (created from ${{ github.ref_name }})"
+
+    - uses: ./.github/actions/slack_notification
+      if: ${{ failure() }}
+      with:
+        slack_token: ${{ inputs.slack_token }}
+        message_pic: ':red_circle:'
+        message: "Job failed for ${{ github.ref_name }}!"

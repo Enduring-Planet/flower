@@ -1,0 +1,42 @@
+{{- if .Values.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ template "tplchart.fullname" . }}
+  labels:
+    app: {{ template "tplchart.name" . }}
+    chart: {{ template "tplchart.chart" . }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+  annotations:
+  {{- with .Values.ingress.albController.annotations }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+    alb.ingress.kubernetes.io/actions.redirect-from-www: >
+      {"type":"redirect","RedirectConfig":{"host":"{{ .Values.ingress.host }}",
+      "port":"443","protocol":"HTTPS","path":"/#{path}","query":"#{query}",
+      "statusCode":"HTTP_301"}}
+spec:
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - pathType: ImplementationSpecific
+            path: {{ .Values.ingress.path }}
+            backend:
+              service:
+                name: {{ template "tplchart.fullname" . }}
+                port:
+                  number: {{ .Values.service.externalPort }}
+
+    - host: www.{{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /*
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: redirect-from-www
+                port:
+                  name: use-annotation
+{{- end -}}

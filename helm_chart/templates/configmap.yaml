@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "tplchart.fullname" . }}-config
+  labels:
+    app: {{ template "tplchart.name" . }}
+    chart: {{ template "tplchart.chart" . }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+data:
+  {{- range $key, $val := .Values.config.open }}
+  {{- if $val }}
+  {{ $key }}: {{ $val | quote }}
+  {{- else }}
+  {{ $key }}: ''
+  {{- end }}
+  {{- end }}

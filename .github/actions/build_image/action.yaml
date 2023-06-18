@@ -1,0 +1,255 @@
+name: build_image
+description: Building docker image
+
+inputs:
+  aws_access_key_id:
+    description: ''
+    required: true
+  aws_secret_access_key:
+    description: ''
+    required: true
+  aws_region:
+    description: 'AWS region'
+    required: false
+    default: us-east-1
+  env_name:
+    description: 'Env name'
+    required: false
+    default: dev
+  services_network:
+    description: 'Containers network'
+    required: true
+  slack_token:
+    description: 'Slack bot token'
+    required: true
+  push_to_ecr:
+    description: ''
+    required: false
+    default: false
+  trivy_ignore_found:
+    description: Ignore found vulnerabilities
+    required: false
+    default: false
+
+outputs:
+  image_tag:
+    description: Created docker image tag
+    value: ${{ steps.push_docker_image.outputs.image_tag }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+      with:
+        path: ~/app
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ inputs.aws_access_key_id }}
+        aws-secret-access-key: ${{ inputs.aws_secret_access_key }}
+        aws-region: ${{ inputs.aws_region }}
+
+    - name: Login to Amazon ECR
+      id: login_ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Prepare builder
+      working-directory: ~/app
+      env:
+        REGISTRY: ${{ steps.login_ecr.outputs.registry }}
+      shell: bash
+      run: |
+        docker context create gh-runner
+
+    - name: Get builder image
+      working-directory: ~/app
+      env:
+        REGISTRY: ${{ steps.login_ecr.outputs.registry }}
+      shell: bash
+      run: |
+        echo "::group::Building builder image"
+        start=$(date +%s)
+        BUILDER_TAG=$(echo "builder-${GITHUB_REF_NAME}" | sed -r "s/[^a-zA-Z0-9._-]/_/g" | cut -c 1-99)
+        BUILDER_IMAGE="${REGISTRY}/ep-backend"
+        BASE_BUILDER_IMAGE="${REGISTRY}/ep-backend:base-builder"
+        
+        start_pull=$(date +%s)
+        echo "Getting build image from registry"
+        docker pull "${BUILDER_IMAGE}:${BUILDER_TAG}" || BUILDER_EXISTS=$?
+        docker tag "${BUILDER_IMAGE}:${BUILDER_TAG}" ep-backend:builder-pulled || true
+
+        if [[ $BUILDER_EXISTS -ne 0 ]]; then
+          PUSH_BASE_IMAGE=true
+          BUILDER_EXISTS=0
+          if [[ "${{ inputs.env_name }}" == "prod" ]]; then
+            docker pull "${BUILDER_IMAGE}:builder-prod" || BUILDER_EXISTS=$?
+            docker tag "${BUILDER_IMAGE}:builder-prod" ep-backend:builder-pulled || true
+          else
+            docker pull "${BUILDER_IMAGE}:builder-base" || BUILDER_EXISTS=$?
+            docker tag "${BUILDER_IMAGE}:builder-base" ep-backend:builder-pulled || true
+          fi
+        fi
+        end_pull=$(date +%s)
+        runtime_pull=$((end_pull-start_pull))
+        
+        start_build=$(date +%s)
+        if [[ $BUILDER_EXISTS -ne 0 ]]; then
+          echo "Building builder"
+          docker buildx build -t ep-backend:builder \
+          --build-arg BASE_BUILDER_IMAGE=$BASE_BUILDER_IMAGE \
+          --cache-to type=inline \
+          --target builder .
+        else
+          echo "Building builder with cache"
+          docker buildx build -t ep-backend:builder \
+          --cache-from ep-backend:builder-pulled \
+          --cache-to type=inline \
+          --build-arg BASE_BUILDER_IMAGE=$BASE_BUILDER_IMAGE \
+          --target builder .
+        fi
+        end_build=$(date +%s)
+        runtime_build=$((end_build-start_build))
+
+        start_push=$(date +%s)
+        docker tag "ep-backend:builder" "${BUILDER_IMAGE}:${BUILDER_TAG}"
+        docker push "${BUILDER_IMAGE}:${BUILDER_TAG}"
+        
+        if [[ "${{ inputs.env_name }}" == "prod" ]]; then
+          docker tag ep-backend:builder ${BUILDER_IMAGE}:builder-prod
+          docker push ${BUILDER_IMAGE}:builder-prod
+        elif [[ "${PUSH_BASE_IMAGE}" == "true" ]]; then
+          docker tag ep-backend:builder ${BUILDER_IMAGE}:builder-base
+          docker push ${BUILDER_IMAGE}:builder-base
+        fi
+        
+        end_push=$(date +%s)
+        runtime_push=$((end_push-start_push))
+        
+        end=$(date +%s)
+        runtime=$((end-start))
+        echo "[INFO] Pull image: $runtime_pull"
+        echo "[INFO] Build image: $runtime_build"
+        echo "[INFO] Push image: $runtime_push"
+        echo "[INFO] Building builder image: $runtime"
+        echo "::endgroup::"
+
+
+    - name: Build runtime image
+      working-directory: ~/app
+      env:
+        REGISTRY: ${{ steps.login_ecr.outputs.registry }}
+      shell: bash
+      run: |
+        echo "::group::Building runtime image"
+        start=$(date +%s)
+        GIT_DESCRIBE="`git describe --always`"
+        GIT_COMMIT_DATE="`git show -s --format=%ci HEAD`"
+        GIT_COMMIT_MESSAGE="`git log -1 --pretty=%s | sed 's/[^a-zA-Z 0-9]/__/g'`"
+
+        echo "Building runtime image"
+        
+        start_build=$(date +%s)
+        docker buildx build -t ep-backend:latest-${{ github.run_number }} \
+        --cache-from ep-backend:builder \
+        --cache-to type=inline \
+        --build-arg GIT_DESCRIBE="$GIT_DESCRIBE" \
+        --build-arg GIT_COMMIT_SHA=${{ github.sha }} \
+        --build-arg GIT_COMMIT_DATE="$GIT_COMMIT_DATE" \
+        --build-arg GIT_COMMIT_MESSAGE="$GIT_COMMIT_MESSAGE" \
+        --target runtime .
+        end_build=$(date +%s)
+        runtime_build=$((end_build-start_build))
+        
+        end=$(date +%s)
+        runtime=$((end-start))
+        echo "[INFO] Build image: $runtime_build"
+        echo "[INFO] Building runtime image: $runtime"
+        echo "::endgroup::"
+
+    - name: Preparing test config
+      id: prepare_test_config
+      shell: bash
+      run: |
+        echo "::group::Tests"
+        start=$(date +%s)
+        mkdir test_results
+        chmod -R 777 test_results
+        if [[ -z "${{ inputs.env_name }}" ]]; then
+          ENV_NAME="dev"
+        else
+          ENV_NAME="${{ inputs.env_name }}"
+        fi
+
+        docker run \
+          -e DB_ENGINE="django.db.backends.postgresql" \
+          -e DB_USER="enduringplanet" \
+          -e DB_DATABASE="enduringplanet" \
+          -e DB_PASSWORD="enduringplanet" \
+          -e DB_HOST="postgres" \
+          -e DB_PORT="5432" \
+          -e AUTH0_DOMAIN="" \
+          -e AUTH0_API_IDENTIFIER="" \
+          -e REDIS_HOST="redis" \
+          -e REDIS_PORT="6379" \
+          -e REDIS_DB_CELERY="0" \
+          -e DEBUG="1" \
+          -e DJANGO_ALLOWED_HOSTS='*' \
+          -e DJANGO_SETTINGS_MODULE="enduring_planet.settings.test" \
+          --network ${{ inputs.services_network }} \
+          --volume `pwd`/test_results:/home/app/app/test_results \
+          ep-backend:latest-${{ github.run_number }} \
+          start_tests
+        end=$(date +%s)
+        runtime=$((end-start))
+        echo "[INFO] Tests: $runtime"
+        echo "::endgroup::"
+
+    - uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test_results_${{ github.run_number }}
+        path: test_results/
+
+    - name: Push docker image
+      if: ${{ inputs.push_to_ecr }} == "true"
+      id: push_docker_image
+      env:
+        REGISTRY: ${{ steps.login_ecr.outputs.registry }}
+      shell: bash
+      run: |
+          echo "::group::Push docker image"
+          start=$(date +%s)
+          if [[ "${{ inputs.push_to_ecr }}" == "true" ]]; then
+            if [[ -z "${{ inputs.env_name }}" ]]; then
+              ECR_IMAGE_NAME="${REGISTRY}/ep-backend-dev"
+            else
+              ECR_IMAGE_NAME="${REGISTRY}/ep-backend-${{ inputs.env_name }}"
+            fi
+
+            ECR_IMAGE_TAG=$(echo "${GITHUB_REF_NAME}-${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}" | sed -r "s/[^a-zA-Z0-9._-]/_/g" | cut -c 1-99)
+            RUNTIME_TAG=$(echo "runtime-${GITHUB_REF_NAME}" | sed -r "s/[^a-zA-Z0-9._-]/_/g" | cut -c 1-99)
+
+            docker tag ep-backend:latest-${{ github.run_number }} $ECR_IMAGE_NAME:${ECR_IMAGE_TAG}
+            docker push "$ECR_IMAGE_NAME:${ECR_IMAGE_TAG}"
+
+            docker tag ep-backend:latest-${{ github.run_number }} $ECR_IMAGE_NAME:${GITHUB_SHA}
+            docker push "$ECR_IMAGE_NAME:${GITHUB_SHA}"
+        
+            docker tag ep-backend:latest-${{ github.run_number }} $ECR_IMAGE_NAME:${RUNTIME_TAG}
+            docker push "$ECR_IMAGE_NAME:${RUNTIME_TAG}"
+
+            echo "::set-output name=image_tag::$ECR_IMAGE_TAG"
+          fi
+          end=$(date +%s)
+          runtime=$((end-start))
+          echo "[INFO] Push docker image: $runtime"
+          echo "::endgroup::"
+
+    - uses: ./.github/actions/slack_notification
+      if: failure()
+      with:
+        slack_token: ${{ inputs.slack_token }}
+        message_pic: ':red_circle:'
+        message: "Build: Job failed for *${{ github.ref_name }}*!"

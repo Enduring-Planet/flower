@@ -1,0 +1,35 @@
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'develop'
+      image_tag:
+        description: 'Image tag to deploy'
+        required: true
+        default: 'latest'
+
+
+jobs:
+  deploy_dispatch:
+    name: Deploy_dispatch
+    runs-on: github-runner-dev
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Deploy application
+        uses: ./.github/actions/deploy_dispatch
+        id: deploy_app
+        with:
+          env_name: ${{ github.event.inputs.env }}
+          image_name: "515448309407.dkr.ecr.us-east-1.amazonaws.com/ep-backend-${{ github.event.inputs.env }}"
+          image_tag: ${{ github.event.inputs.image_tag }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: us-east-1
+          aws_profile: ep
+          slack_token: ${{ github.event.inputs.slack_token }}

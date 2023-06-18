@@ -1,0 +1,58 @@
+# Default values for osf-flower.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+replicaCount: 1
+
+image:
+  repository: mher/flower
+  tag: 1.2
+  pullPolicy: Always
+
+container:
+  command:
+    - "celery"
+    - "flower"
+    - "--basic_auth=enduring_flower:$(FLOWER_UI_PASSWORD)"
+
+resources:
+   limits:
+     cpu: 100m
+     memory: 128Mi
+   requests:
+     cpu: 50m
+     memory: 64Mi
+
+service:
+  name: flower
+  type: NodePort
+  externalPort: 8008
+  internalPort: 5555
+
+ingress:
+  enabled: true
+  # Used to create Ingress record (should used with service.type: ClusterIP).
+  host: flower.devenduringplanet.link
+  paths: /
+  albController:
+    annotations:
+      alb.ingress.kubernetes.io/actions.ssl-redirect: >-
+        {'Type': 'redirect', 'RedirectConfig': { 'Protocol': 'HTTPS', 'Port':
+        '443', 'StatusCode': 'HTTP_301'}}
+      alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:515448309407:certificate/49f54ea7-a821-484d-b909-a564d5e66355"
+      alb.ingress.kubernetes.io/group.name: ep-dev
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}, {"HTTP":80}]'
+      alb.ingress.kubernetes.io/load-balancer-name: ep-dev
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/ssl-redirect: '443'
+      alb.ingress.kubernetes.io/tags: 'Environment=dev'
+      alb.ingress.kubernetes.io/target-type: instance
+      kubernetes.io/ingress.class: alb
+
+config:
+  open:
+    REDIS_HOST: 'master.redis-dev.z4nmqr.use1.cache.amazonaws.com'
+    REDIS_PORT: '6379'
+    REDIS_DB_CELERY: '1'
+    REDIS_DB_CACHE: '5'
+    REDIS_USE_SSL: '1'
+    ENV: 'dev'

@@ -1,0 +1,94 @@
+name: test_app
+description: Testing App
+
+inputs:
+  image_name:
+    description: Docker Image name
+    required: true
+  image_tag:
+    description: Docker Image tag
+    required: true
+  aws_access_key_id:
+    description: Access key
+    required: true
+  aws_secret_access_key:
+    description: Secret key
+    required: true
+  aws_region:
+    description: AWS region
+    required: false
+    default: us-east-1
+  services_network:
+    description: Containers network
+    required: true
+  env_name:
+    description: 'Env name'
+    required: false
+    default: dev
+  slack_token:
+    description: 'Slack bot token'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ inputs.aws_access_key_id }}
+        aws-secret-access-key: ${{ inputs.aws_secret_access_key }}
+        aws-region: ${{ inputs.aws_region }}
+
+    - name: Login to Amazon ECR
+      id: login_ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Preparing test config
+      id: prepare_test_config
+      shell: bash
+      run: |
+        mkdir test_results
+        chmod -R 777 test_results
+        if [[ -z "${{ inputs.env_name }}" ]]; then
+          ENV_NAME="dev"
+        else
+          ENV_NAME="${{ inputs.env_name }}"
+        fi
+
+        docker pull -q ${{ inputs.image_name }}-$ENV_NAME:${{ inputs.image_tag }}
+
+        docker run \
+          -e DB_ENGINE="django.db.backends.postgresql" \
+          -e DB_USER="enduringplanet" \
+          -e DB_DATABASE="enduringplanet" \
+          -e DB_PASSWORD="enduringplanet" \
+          -e DB_HOST="postgres" \
+          -e DB_PORT="5432" \
+          -e AUTH0_DOMAIN="" \
+          -e AUTH0_API_IDENTIFIER="" \
+          -e REDIS_HOST="redis" \
+          -e REDIS_PORT="6379" \
+          -e REDIS_DB_CELERY="0" \
+          -e DEBUG="1" \
+          -e DJANGO_ALLOWED_HOSTS='*' \
+          -e DJANGO_SETTINGS_MODULE="enduring_planet.settings.test" \
+          --network ${{ inputs.services_network }} \
+          --volume `pwd`/test_results:/home/app/app/test_results \
+          ${{ inputs.image_name }}-$ENV_NAME:${{ inputs.image_tag }} \
+          start_tests
+
+    - uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test_results_${{ github.run_number }}
+        path: test_results/
+
+    - uses: ./.github/actions/slack_notification
+      if: failure()
+      with:
+        slack_token: ${{ inputs.slack_token }}
+        message_pic: ':red_circle:'
+        message: "Tests: Job failed for *${{ github.ref_name }}*!"

@@ -1,0 +1,35 @@
+name: Backend deploy stage
+
+on:
+  push:
+    branches:
+      - 'release/**'
+
+jobs:
+  build_docker_image_call:
+    name: 'Builder'
+    uses: ./.github/workflows/build_and_test_call.yaml
+    with:
+      env_name: main
+      ecr_region: "us-east-1"
+      push_to_ecr: true
+      trivy_ignore_found: false
+    secrets: inherit
+
+  deploy_main:
+    name: 'Deploy / stage'
+    runs-on: github-runner-dev
+    needs: [build_docker_image_call]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/deploy_app
+        id: deploy_app
+        with:
+          env_name: stage
+          image_name: "515448309407.dkr.ecr.us-east-1.amazonaws.com/ep-backend-main"
+          image_tag: ${{ needs.build_docker_image_call.outputs.image_tag }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: us-east-1
+          aws_profile: ep
+          slack_token: ${{ secrets.SLACK_TOKEN }}

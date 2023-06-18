@@ -1,0 +1,60 @@
+name: Backend deploy Prod
+
+on:
+  push:
+    tags:
+      - 'prod-v.**'
+
+jobs:
+  build_start_notification:
+    name: 'Sending Slack notification build starts'
+    runs-on: github-runner-dev
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/slack_notification
+        with:
+          slack_token: ${{ secrets.SLACK_TOKEN }}
+          message: "*PROD Backend* build started"
+          message_pic: ':cubimal_chick:'
+
+  build_docker_image_call:
+    name: 'Builder'
+    uses: ./.github/workflows/build_and_test_call.yaml
+    with:
+      env_name: prod
+      ecr_region: "us-east-2"
+      push_to_ecr: true
+      trivy_ignore_found: true
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+      SLACK_TOKEN: ${{ secrets.SLACK_TOKEN }}
+
+  create_gh_release:
+    name: 'Tagged GitHub Release'
+    runs-on: github-runner-dev
+    needs: [build_docker_image_call]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ncipollo/release-action@v1
+        with:
+          generateReleaseNotes: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy_main:
+    name: 'Deploy / prod'
+    runs-on: github-runner-dev
+    needs: [build_docker_image_call]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/deploy_app
+        id: deploy_app
+        with:
+          env_name: prod
+          image_name: "749696123970.dkr.ecr.us-east-2.amazonaws.com/ep-backend-prod"
+          image_tag: ${{ needs.build_docker_image_call.outputs.image_tag }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          aws_region: us-east-2
+          aws_profile: ep-prod
+          slack_token: ${{ secrets.SLACK_TOKEN }}
